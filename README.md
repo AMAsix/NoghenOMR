@@ -15,7 +15,7 @@ Optical Music Recognition (OMR) web application for detecting staves and measure
 
 - Node.js 18+
 - Python 3.10+
-- Optional: homr library for advanced OMR (requires working scipy)
+- homr library for OMR (automatically installed via requirements.txt)
 
 ## Quick Start
 
@@ -43,7 +43,17 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 4. Run development servers
+### 4. Apply homr patches (required for numpy 2.x)
+
+homr has compatibility issues with numpy 2.x. Run the patch script after installing:
+
+```bash
+python patches/apply_homr_numpy2_patches.py
+```
+
+> **Note**: Re-run this script whenever you reinstall homr.
+
+### 5. Run development servers
 
 ```bash
 npm run dev
@@ -74,14 +84,14 @@ This starts:
 
 ## Detection Algorithm
 
-The application uses a projection-based algorithm for detecting musical elements:
+The application uses the `homr` library for detecting musical elements:
 
 1. **PDF Rendering**: PyMuPDF renders PDF pages to high-resolution PNG images
-2. **System Detection**: Horizontal projection analysis finds gaps between music systems
-3. **Staff Line Detection**: Identifies the characteristic 5-line patterns of musical staves
-4. **Barline Detection**: Vertical projection analysis finds measure dividers
-
-When the `homr` library is available, it provides enhanced detection using machine learning models.
+2. **OMR Processing**: homr uses machine learning models to detect:
+   - Staff lines and systems
+   - Noteheads and stems
+   - Barlines and measure boundaries
+   - Clefs and key signatures
 
 ## License
 
