@@ -1,0 +1,28 @@
+{
+  "name": "noghenomr",
+  "version": "1.0.0",
+  "description": "Optical Music Recognition (OMR) web application for detecting staves and measure lines in scanned sheet music",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:frontend\" \"npm run dev:server\"",
+    "dev:frontend": "vite",
+    "dev:server": "python -m server.main",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "keywords": ["omr", "optical-music-recognition", "sheet-music", "music"],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.0.0",
+    "typescript": "~5.7.2",
+    "vite": "^6.0.0"
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  }
+}
