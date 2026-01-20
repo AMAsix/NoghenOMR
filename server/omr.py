@@ -32,13 +32,13 @@ except Exception as e:
     fitz = None
     logging.getLogger(__name__).warning('PyMuPDF (fitz) unavailable: %s', e)
 
-# homr is optional; try import once at module load and fall back gracefully
+# homr is required for OMR detection
 try:
     import homr
     from homr import main as hm
 except Exception as e:
     hm = None
-    logging.getLogger(__name__).info('homr not available: %s', e)
+    logging.getLogger(__name__).error('homr is required but not available: %s', e)
 
 logger = logging.getLogger(__name__)
 
@@ -114,131 +114,16 @@ def _detect_barlines_in_region(arr_gray, bbox, min_vertical_coverage=0.6, col_ga
         return []
 
 
-def _fallback_barline_detector(img_bytes_local, page_idx):
-    """A simple fallback that finds systems (vertical whitespace separators)
-    and then detects vertical barlines inside each system using projections.
-    """
-    try:
-        if Image is None or np is None:
-            return {'error': 'missing_imaging_libs', 'detail': 'PIL or numpy not available', 'page_index': page_idx}
-        im_fb = Image.open(io.BytesIO(img_bytes_local)).convert('L')
-        arr_fb = np.array(im_fb)
-        h_fb, w_fb = arr_fb.shape
-        inv_fb = 255 - arr_fb
-
-        # row projections to find separators between systems
-        row_sums_fb = inv_fb.mean(axis=1)
-        try:
-            window = max(3, int(max(1, h_fb * 0.01)))
-            kernel = np.ones(window, dtype=float) / float(window)
-            row_smooth_fb = np.convolve(row_sums_fb, kernel, mode='same')
-        except Exception:
-            row_smooth_fb = row_sums_fb
-
-        try:
-            whitespace_thresh = float(np.percentile(row_smooth_fb, 25))
-        except Exception:
-            whitespace_thresh = float(row_smooth_fb.mean())
-        sep_mask = row_smooth_fb < whitespace_thresh
-        separators_fb = []
-        in_sep_fb = False
-        sep_start_fb = 0
-        for y in range(h_fb):
-            if sep_mask[y] and not in_sep_fb:
-                in_sep_fb = True
-                sep_start_fb = y
-            elif not sep_mask[y] and in_sep_fb:
-                in_sep_fb = False
-                separators_fb.append((sep_start_fb, y))
-        if in_sep_fb:
-            separators_fb.append((sep_start_fb, h_fb - 1))
-
-        systems_fb = []
-        last_fb = 0
-        for (s0, s1) in separators_fb:
-            if s0 - last_fb > 20:
-                systems_fb.append({'bbox': [0, int(last_fb), int(w_fb), int(s0 - last_fb)]})
-            last_fb = s1 + 1
-        if h_fb - last_fb > 20:
-            systems_fb.append({'bbox': [0, int(last_fb), int(w_fb), int(h_fb - last_fb)]})
-        if not systems_fb:
-            systems_fb = [{'bbox': [0, 0, int(w_fb), int(h_fb)]}]
-
-        # detect column peaks globally then test per-system
-        col_sums_fb = inv_fb.mean(axis=0)
-        cmean = float(col_sums_fb.mean())
-        cstd = float(col_sums_fb.std())
-        col_thresh_fb = cmean + cstd * 0.9
-
-        col_peaks_fb = []
-        for x in range(1, len(col_sums_fb) - 1):
-            if col_sums_fb[x] > col_thresh_fb and col_sums_fb[x] > col_sums_fb[x - 1] and col_sums_fb[x] >= col_sums_fb[x + 1]:
-                col_peaks_fb.append(int(x))
-
-        # cluster peaks
-        clustered_cols_fb = []
-        cluster_fb = []
-        for x in sorted(col_peaks_fb):
-            if not cluster_fb or x - cluster_fb[-1] <= 4:
-                cluster_fb.append(x)
-            else:
-                clustered_cols_fb.append(int(sum(cluster_fb) / len(cluster_fb)))
-                cluster_fb = [x]
-        if cluster_fb:
-            clustered_cols_fb.append(int(sum(cluster_fb) / len(cluster_fb)))
-
-        measures_fb = []
-        for sys_fb in systems_fb:
-            sy = int(sys_fb['bbox'][1])
-            sh = int(sys_fb['bbox'][3])
-            sys_top = sy
-            sys_bottom = sy + sh
-            sys_measures = []
-            for x in clustered_cols_fb:
-                col_slice = inv_fb[sys_top:sys_bottom, x]
-                if col_slice.size == 0:
-                    continue
-                dark_frac = float((col_slice > 30).sum()) / float(col_slice.size)
-                if dark_frac > 0.18:
-                    sys_measures.append(int(x))
-            sys_measures = sorted(sys_measures)
-            clustered_sys_fb = []
-            cl_fb = []
-            for x in sys_measures:
-                if not cl_fb or x - cl_fb[-1] <= 4:
-                    cl_fb.append(x)
-                else:
-                    clustered_sys_fb.append(int(sum(cl_fb) / len(cl_fb)))
-                    cl_fb = [x]
-            if cl_fb:
-                clustered_sys_fb.append(int(sum(cl_fb) / len(cl_fb)))
-            for x in clustered_sys_fb:
-                measures_fb.append({'x': int(x), 'y0': int(sys_top), 'y1': int(sys_bottom)})
-
-        image_b64_fb = base64.b64encode(img_bytes_local).decode('ascii')
-        return {
-            'staves': [],
-            'systems': systems_fb,
-            'measures': measures_fb,
-            'image': image_b64_fb,
-            'image_width': int(w_fb),
-            'image_height': int(h_fb),
-            'page_index': int(page_idx)
-        }
-    except Exception as e:
-        logger.exception('fallback barline detection failed for page %s', page_idx)
-        return {'error': 'fallback detection failed', 'detail': str(e), 'page_index': page_idx}
-
-
 def _process_page_bytes(img_bytes_local, page_idx):
-    """Process a single page image bytes and return normalized measures/systems."""
+    """Process a single page image bytes using homr for OMR detection."""
     try:
         from PIL import Image
         import numpy as np
         try:
             from homr import main as hm
-        except Exception:
-            hm = None
+        except Exception as e:
+            logger.error('homr is required but not available: %s', e)
+            return {'error': 'homr_unavailable', 'detail': 'homr library is required but not installed', 'page_index': page_idx}
 
         try:
             im_tmp = Image.open(io.BytesIO(img_bytes_local)).convert('L')
@@ -247,147 +132,161 @@ def _process_page_bytes(img_bytes_local, page_idx):
         except Exception:
             h_local, w_local = 0, 0
 
-        # if homr available try it first
-        if hm is not None:
-            tmpf = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
+        tmpf = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
+        try:
+            tmpf.write(img_bytes_local)
+            tmpf.flush()
+            tmpf.close()
+            # ProcessingConfig(enable_debug, enable_cache, write_staff_positions, 
+            #                  read_staff_positions, selected_staff, use_gpu_inference)
+            cfg = hm.ProcessingConfig(False, False, False, False, -1, False)
             try:
-                tmpf.write(img_bytes_local)
-                tmpf.flush()
-                tmpf.close()
-                # ProcessingConfig(enable_debug, enable_cache, write_staff_positions, 
-                #                  read_staff_positions, selected_staff, use_gpu_inference)
-                cfg = hm.ProcessingConfig(False, False, False, False, -1, False)
+                logger.info('Starting homr detect_staffs_in_image for page %s', page_idx)
+                multi_staffs, pre, debug, title_future = hm.detect_staffs_in_image(tmpf.name, cfg)
+                logger.info('homr detect_staffs_in_image succeeded for page %s, found %d staff groups', page_idx, len(multi_staffs) if multi_staffs else 0)
+            except Exception as e:
+                logger.warning('homr detect_staffs_in_image initial attempt failed: %s', e, exc_info=True)
                 try:
-                    multi_staffs, pre, debug, title_future = hm.detect_staffs_in_image(tmpf.name, cfg)
-                except Exception as e:
-                    logger.info('homr detect_staffs_in_image failed: %s', e)
-                    try:
-                        if hasattr(hm, 'download_weights'):
-                            hm.download_weights(use_gpu_inference=False)
-                            multi_staffs, pre, debug, title_future = hm.detect_staffs_in_image(tmpf.name, cfg)
-                        else:
-                            raise
-                    except Exception as e2:
-                        logger.warning('homr failed: %s', e2)
-                        multi_staffs = None
-                        pre = None
+                    if hasattr(hm, 'download_weights'):
+                        logger.info('Attempting to download homr weights...')
+                        hm.download_weights(use_gpu_inference=False)
+                        multi_staffs, pre, debug, title_future = hm.detect_staffs_in_image(tmpf.name, cfg)
+                        logger.info('homr succeeded after downloading weights')
+                    else:
+                        raise
+                except Exception as e2:
+                    logger.error('homr failed: %s', e2, exc_info=True)
+                    return {'error': 'homr_detection_failed', 'detail': str(e2), 'page_index': page_idx}
 
-                if multi_staffs:
-                    try:
-                        pre_h, pre_w = int(pre.shape[0]), int(pre.shape[1])
-                    except Exception:
-                        pre_h, pre_w = (h_local or 1), (w_local or 1)
-                    scale_x_map = float(w_local) / float(pre_w) if pre_w else 1.0
-                    scale_y_map = float(h_local) / float(pre_h) if pre_h else 1.0
+            if not multi_staffs:
+                return {'error': 'homr_no_results', 'detail': 'homr did not detect any staffs in the image', 'page_index': page_idx}
 
-                    staves = []
-                    systems = []
-                    measures = []
+            # Get dimensions from the preprocessed image
+            try:
+                if hasattr(pre, 'shape') and len(pre.shape) >= 2:
+                    pre_h = int(np.asarray(pre.shape[0]).item())
+                    pre_w = int(np.asarray(pre.shape[1]).item())
+                else:
+                    pre_h, pre_w = (h_local or 1), (w_local or 1)
+            except Exception:
+                pre_h, pre_w = (h_local or 1), (w_local or 1)
+            scale_x_map = float(w_local) / float(pre_w) if pre_w else 1.0
+            scale_y_map = float(h_local) / float(pre_h) if pre_h else 1.0
 
-                    for multi in multi_staffs:
-                        staffs = None
-                        for attr in dir(multi):
-                            if attr.startswith('_'):
-                                continue
-                            try:
-                                val = getattr(multi, attr)
-                            except Exception:
-                                continue
-                            if isinstance(val, (list, tuple)) and len(val) > 0:
-                                if hasattr(val[0], 'min_x') and hasattr(val[0], 'min_y'):
-                                    staffs = val
-                                    break
-                        if not staffs and isinstance(multi, (list, tuple)) and len(multi) > 0 and hasattr(multi[0], 'min_x'):
-                            staffs = list(multi)
-                        if not staffs:
-                            continue
+            staves = []
+            systems = []
+            measures = []
 
-                        for staff in staffs:
-                            min_x = int(getattr(staff, 'min_x', 0))
-                            min_y = int(getattr(staff, 'min_y', 0))
-                            max_x = int(getattr(staff, 'max_x', min_x))
-                            max_y = int(getattr(staff, 'max_y', min_y))
-                            systems.append({
-                                'bbox': [
-                                    int(min_x * scale_x_map),
-                                    int(min_y * scale_y_map),
-                                    int((max_x - min_x) * scale_x_map),
-                                    int((max_y - min_y) * scale_y_map)
-                                ]
-                            })
-
-                            grid = getattr(staff, 'grid', []) or []
-                            lines = []
-                            if grid:
-                                try:
-                                    import numpy as _np
-                                    for i in range(5):
-                                        ys = [getattr(p, 'y', [])[i] for p in grid if hasattr(p, 'y') and len(getattr(p, 'y', [])) > i]
-                                        if ys:
-                                            lines.append(int(float(_np.median(ys))))
-                                except Exception:
-                                    lines = []
-
-                            lines_mapped = [int(y * scale_y_map) for y in lines]
-                            staves.append({
-                                'lines': lines_mapped,
-                                'bbox': [
-                                    int(min_x * scale_x_map),
-                                    int(min_y * scale_y_map),
-                                    int((max_x - min_x) * scale_x_map),
-                                    int((max_y - min_y) * scale_y_map)
-                                ]
-                            })
-
-                            # Detect barlines inside the staff bbox
-                            try:
-                                staff_bbox = [
-                                    int(min_x * scale_x_map),
-                                    int(min_y * scale_y_map),
-                                    int((max_x - min_x) * scale_x_map),
-                                    int((max_y - min_y) * scale_y_map)
-                                ]
-                                local_measures = _detect_barlines_in_region(arr_tmp, staff_bbox)
-                                for mm in local_measures:
-                                    measures.append({'x': int(mm['x']), 'y0': int(mm['y0']), 'y1': int(mm['y1'])})
-                            except Exception:
-                                pass
-
-                    def _uniq(lst, key):
-                        seen = set()
-                        out = []
-                        for item in lst:
-                            k = tuple(item.get(key) if isinstance(item.get(key), (list, tuple)) else (item.get(key),))
-                            if k in seen:
-                                continue
-                            seen.add(k)
-                            out.append(item)
-                        return out
-
-                    systems = _uniq(systems, 'bbox')
-                    staves = _uniq(staves, 'bbox')
-                    measures = _uniq(measures, 'x')
-
-                    image_b64 = base64.b64encode(img_bytes_local).decode('ascii')
-                    return {
-                        'staves': staves,
-                        'systems': systems,
-                        'measures': measures,
-                        'image': image_b64,
-                        'image_width': int(w_local),
-                        'image_height': int(h_local),
-                        'page_index': int(page_idx)
-                    }
-            finally:
+            def _to_int(val):
+                """Safely convert a value (possibly numpy scalar/array) to Python int."""
                 try:
-                    os.unlink(tmpf.name)
+                    return int(np.asarray(val).item())
                 except Exception:
-                    pass
+                    return int(val)
 
-        # fallback to simple detector
-        return _fallback_barline_detector(img_bytes_local, page_idx)
+            for multi in multi_staffs:
+                staffs = None
+                for attr in dir(multi):
+                    if attr.startswith('_'):
+                        continue
+                    try:
+                        val = getattr(multi, attr)
+                    except Exception:
+                        continue
+                    if isinstance(val, (list, tuple)) and len(val) > 0:
+                        if hasattr(val[0], 'min_x') and hasattr(val[0], 'min_y'):
+                            staffs = val
+                            break
+                if not staffs and isinstance(multi, (list, tuple)) and len(multi) > 0 and hasattr(multi[0], 'min_x'):
+                    staffs = list(multi)
+                if not staffs:
+                    continue
+
+                for staff in staffs:
+                    min_x = _to_int(getattr(staff, 'min_x', 0))
+                    min_y = _to_int(getattr(staff, 'min_y', 0))
+                    max_x = _to_int(getattr(staff, 'max_x', min_x))
+                    max_y = _to_int(getattr(staff, 'max_y', min_y))
+                    systems.append({
+                        'bbox': [
+                            _to_int(min_x * scale_x_map),
+                            _to_int(min_y * scale_y_map),
+                            _to_int((max_x - min_x) * scale_x_map),
+                            _to_int((max_y - min_y) * scale_y_map)
+                        ]
+                    })
+
+                    grid = getattr(staff, 'grid', []) or []
+                    lines = []
+                    if grid:
+                        try:
+                            import numpy as _np
+                            for i in range(5):
+                                ys = [getattr(p, 'y', [])[i] for p in grid if hasattr(p, 'y') and len(getattr(p, 'y', [])) > i]
+                                if ys:
+                                    lines.append(_to_int(float(_np.median(ys))))
+                        except Exception:
+                            lines = []
+
+                    lines_mapped = [_to_int(y * scale_y_map) for y in lines]
+                    staves.append({
+                        'lines': lines_mapped,
+                        'bbox': [
+                            _to_int(min_x * scale_x_map),
+                            _to_int(min_y * scale_y_map),
+                            _to_int((max_x - min_x) * scale_x_map),
+                            _to_int((max_y - min_y) * scale_y_map)
+                        ]
+                    })
+
+                    # Detect barlines inside the staff bbox
+                    try:
+                        staff_bbox = [
+                            _to_int(min_x * scale_x_map),
+                            _to_int(min_y * scale_y_map),
+                            _to_int((max_x - min_x) * scale_x_map),
+                            _to_int((max_y - min_y) * scale_y_map)
+                        ]
+                        local_measures = _detect_barlines_in_region(arr_tmp, staff_bbox)
+                        for mm in local_measures:
+                            measures.append({'x': _to_int(mm['x']), 'y0': _to_int(mm['y0']), 'y1': _to_int(mm['y1'])})
+                    except Exception:
+                        pass
+
+            def _uniq(lst, key):
+                seen = set()
+                out = []
+                for item in lst:
+                    k = tuple(item.get(key) if isinstance(item.get(key), (list, tuple)) else (item.get(key),))
+                    if k in seen:
+                        continue
+                    seen.add(k)
+                    out.append(item)
+                return out
+
+            systems = _uniq(systems, 'bbox')
+            staves = _uniq(staves, 'bbox')
+            measures = _uniq(measures, 'x')
+
+            image_b64 = base64.b64encode(img_bytes_local).decode('ascii')
+            return {
+                'staves': staves,
+                'systems': systems,
+                'measures': measures,
+                'image': image_b64,
+                'image_width': int(w_local),
+                'image_height': int(h_local),
+                'page_index': int(page_idx)
+            }
+        finally:
+            try:
+                os.unlink(tmpf.name)
+            except Exception:
+                pass
+
     except Exception as e:
-        return {'error': 'processing failed', 'detail': str(e), 'page_index': page_idx}
+        logger.exception('OMR processing failed for page %s', page_idx)
+        return {'error': 'processing_failed', 'detail': str(e), 'page_index': page_idx}
 
 
 @omr_bp.route('/process', methods=['POST'])
