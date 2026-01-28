@@ -19,6 +19,13 @@ def health():
     return {'status': 'ok'}
 
 
-if __name__ == '__main__':
+def main():
     print("Starting NoghenOMR backend on http://localhost:4000")
     app.run(host='0.0.0.0', port=4000, debug=True)
+
+
+if __name__ == '__main__':
+    main()
+else:
+    # When run with `python -m server.main`, __name__ is 'server.main'
+    main()
