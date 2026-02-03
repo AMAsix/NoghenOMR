@@ -15,7 +15,6 @@ Optical Music Recognition (OMR) web application for detecting staves and measure
 
 - Node.js 18+
 - Python 3.10+
-- homr library for OMR (automatically installed via requirements.txt)
 
 ## Quick Start
 
